@@ -1,0 +1,36 @@
+C:\Desarrollo\Web\proficy\
+│
+├── db\
+│   ├── proficy.sqlite          ← LA DB (reconstruida de las partes)
+│   ├── proficy_parte_aa        ← backup de las partes comprimidas
+│   └── proficy_parte_ab
+│
+├── corpus_raw\                 ← guardá acá los .bblx originales
+│   ├── Peshita_Español.bblx
+│   ├── Septuaginta_con_Strong_LXX_.bblx
+│   ├── JERUSALEN.bblx
+│   ├── BHSE__1_.bbli
+│   ├── vulgate.bblx
+│   └── ... (todos los que tenés)
+│
+├── scripts\                    ← los .py descargados
+│   ├── build_corpus_db.py
+│   └── search.py
+│
+└── src\                        ← acá va a vivir la React app (próximo paso)
+
+
+
+a deployar
+
+Hostinger VPS
+├── /var/www/proficy/
+│   ├── db/
+│   │   └── proficy.sqlite      ← la DB sube acá
+│   ├── api/
+│   │   └── server.py           ← API Python que sirve consultas
+│   └── app/
+│       └── build/              ← React compilado (cuando lo hagamos)
+│
+└── nginx config
+    └── proficy.conf            ← sirve la app en el subdominio
