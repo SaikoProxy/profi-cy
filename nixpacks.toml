@@ -1,0 +1,5 @@
+[phases.build]
+cmds = ["pip install -r api/requirements.txt"]
+
+[start]
+cmd = "python api/server.py"
