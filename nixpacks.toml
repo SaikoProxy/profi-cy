@@ -9,3 +9,6 @@ cmds = []
 
 [start]
 cmd = "python api/server.py"
+
+[variables]
+NIXPACKS_NO_NODE = "1"
