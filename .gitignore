@@ -24,6 +24,3 @@ corpus_extra/*.bbli
 *.log
 {src,public}/
 
-db/proficy.sqlite
-db/*.sqlite
-db/*.bblx
