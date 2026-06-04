@@ -10,7 +10,7 @@ from werkzeug.utils import secure_filename
 from corpus_parser import parse_any, list_corpus, CORPUS_DIR
 from bhs_parser import parse_bhs_interlinear
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=None, static_url_path=None)
 CORS(app)
 
 BASE    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
