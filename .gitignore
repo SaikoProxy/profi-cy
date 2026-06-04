@@ -1,5 +1,4 @@
 node_modules/
-build/
 db/*.backup*.sqlite
 db/proficy_parte_*
 api/__pycache__/
@@ -23,4 +22,3 @@ corpus_extra/*.bbli
 .env
 *.log
 {src,public}/
-
