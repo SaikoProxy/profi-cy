@@ -3,7 +3,7 @@
 PROFI-CY · API Server v2
 Ejecutar: python server.py
 """
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import sqlite3, re, unicodedata, os, zlib, hmac, hashlib, time, json
 from werkzeug.utils import secure_filename
@@ -15,6 +15,7 @@ CORS(app)
 
 BASE    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(BASE, "db", "proficy.sqlite")
+BUILD_DIR = os.path.join(BASE, "build")
 
 HEBREW_GEMATRIA = {
     '\u05d0':1,'\u05d1':2,'\u05d2':3,'\u05d3':4,'\u05d4':5,
@@ -71,12 +72,6 @@ def r2d(row):  return dict(row) if row else None
 
 
 def bhs_hebreo_limpio(text):
-    """
-    Convierte el texto BHS crudo (formato flat con campos pegados) en una
-    linea de SOLO hebreo (con nikkud), palabra por palabra separada por espacio.
-    Reutiliza el parser interlineal y junta el campo 'hebrew' de cada palabra.
-    Si por algo falla, devuelve el texto original sin tocar.
-    """
     try:
         words = parse_bhs_interlinear(text)
         if words:
@@ -116,8 +111,6 @@ def parallel():
         FROM verses v JOIN versions ver ON ver.code=v.version_code
         WHERE v.book_abbrev=? AND v.chapter=? AND v.verse=?
         ORDER BY v.lang_code,v.version_code""",(book,ch,vs)).fetchall())
-    # La fila BHS trae el texto crudo (flat con Strong/translit/gloss pegados).
-    # Para PARALELO mostramos solo el hebreo limpio, como las demas versiones.
     for v in versos:
         if v.get("version_code") == "BHS" and v.get("text"):
             v["text"] = bhs_hebreo_limpio(v["text"])
@@ -264,25 +257,16 @@ def stats():
 
 @app.route("/api/interlinear")
 def interlinear():
-    """Análisis interlineal BHS. El parser bhs_parser.py hace el trabajo principal;
-    el enriquecimiento con strong_definitions es OPCIONAL y nunca debe tumbar el endpoint."""
     book = request.args.get("book","").lower()
     ch   = request.args.get("ch", type=int)
     vs   = request.args.get("vs", type=int)
     if not book or not ch or not vs:
         return jsonify({"error":"Faltan: book, ch, vs"}), 400
     db = get_db()
-    # 1) Traer el texto BHS del versículo (esto es lo único imprescindible).
     bhs = db.execute("""
         SELECT text FROM verses
         WHERE book_abbrev=? AND chapter=? AND verse=? AND version_code='BHS'
     """, (book, ch, vs)).fetchone()
-
-    # 2) Enriquecimiento OPCIONAL con strong_definitions.
-    #    Se ejecuta en try/except y detectando que columnas existen realmente,
-    #    porque el esquema de strong_definitions puede NO tener original_word /
-    #    transliteration. Si la query falla por cualquier motivo, seguimos con
-    #    las palabras del parser en vez de tumbar el endpoint con un 500.
     strongs = []
     try:
         cols = {row[1] for row in db.execute("PRAGMA table_info(strong_definitions)").fetchall()}
@@ -296,18 +280,12 @@ def interlinear():
             ORDER BY si.strong_num""")
         strongs = r2l(db.execute(q, (book, ch, vs)).fetchall())
     except Exception as e:
-        # No abortamos: el interlineal funciona igual con lo que da el parser.
         print("interlinear: enriquecimiento Strong omitido:", e)
         strongs = []
     db.close()
-
     if not bhs:
         return jsonify({"error":"No hay BHS para este versículo (solo AT)","words":[]}), 200
-
-    # 3) Parsear el texto BHS (fuente principal de datos por palabra).
     words = parse_bhs_interlinear(bhs["text"])
-
-    # 4) Completar campos faltantes con los Strong (si los hay).
     strong_map = {s['strong_num']: s for s in strongs}
     for w in words:
         s = strong_map.get(w['strong'])
@@ -318,15 +296,13 @@ def interlinear():
             if defn: w['es'] = defn
         if s.get('original_word'):   w['hebrew_ml'] = s['original_word']
         if s.get('transliteration'): w['translit_ml'] = s['transliteration']
-
     return jsonify({"book":book,"chapter":ch,"verse":vs,
                     "words":words,"word_count":len(words)})
 
 
-# ── Parser interlineal NT (NA27/BYZ/WH/TISCH desde bblx) ──
 import json as _json
 
-BBLX_DIR = CORPUS_DIR   # los .bblx estan en corpus_extra
+BBLX_DIR = CORPUS_DIR
 
 BBLX_FILES = {
     'NA27':  'iNA27__Nestle_Aland_Interlineal_Griego_Español__1_.bblx',
@@ -405,7 +381,6 @@ def _grk_translit(word):
     return ''.join(result)
 
 def parse_nt_verse(scripture):
-    """Parsea un verso interlineal NT bblx -> lista de palabras."""
     if isinstance(scripture, (bytes, bytearray)):
         try: text = scripture.decode('utf-8')
         except: text = scripture.decode('latin-1', errors='replace')
@@ -414,10 +389,10 @@ def parse_nt_verse(scripture):
     words = []
     for m in WORD_RE_NT.finditer(text):
         greek = _hex_to_greek(m.group(1))
-        sm    = m.group(2).strip()          # G976:N-NSF
+        sm    = m.group(2).strip()
         es    = m.group(3).strip()
         parts = sm.split(':', 1)
-        strong = parts[0]                   # G976
+        strong = parts[0]
         morph  = parts[1] if len(parts)>1 else ''
         if greek:
             words.append({
@@ -432,7 +407,6 @@ def parse_nt_verse(scripture):
 
 _bblx_cache = {}
 def _get_bblx_conn(version='NA27'):
-    """Busca el bblx por version con match flexible en corpus_extra."""
     KEYWORDS = {
         'NA27':  ['NA27', 'Nestle', 'nestle', 'iNA27'],
         'BYZ':   ['Byzantino', 'byzantino', 'Byzantine', 'BYZ'],
@@ -440,7 +414,6 @@ def _get_bblx_conn(version='NA27'):
         'TISCH': ['Tischendorf', 'tischendorf', 'TISCH'],
     }
     keywords = KEYWORDS.get(version, KEYWORDS['NA27'])
-    # Buscar en corpus_extra por nombre que contenga alguna keyword
     candidates = []
     try:
         for fname in os.listdir(BBLX_DIR):
@@ -466,7 +439,6 @@ def _get_bblx_conn(version='NA27'):
 
 @app.route("/api/interlinear_nt")
 def interlinear_nt():
-    """Interlineal NT griego (NA27/BYZ/WH/TISCH) desde bblx."""
     book    = request.args.get("book","").lower()
     ch      = request.args.get("ch", type=int)
     vs      = request.args.get("vs", type=int)
@@ -486,7 +458,6 @@ def interlinear_nt():
     if not row:
         return jsonify({"error":"Verso no encontrado", "words":[]}), 200
     words = parse_nt_verse(row['Scripture'])
-    # Enriquecer con strong_definitions de la DB principal
     db = get_db()
     try:
         for w in words:
@@ -507,7 +478,6 @@ def interlinear_nt():
 
 @app.route("/api/catena")
 def catena_list():
-    """Devuelve entradas de la Catena Aurea. Sin book = índice general."""
     book  = request.args.get("book","").lower()
     limit = request.args.get("limit",200,type=int)
     db = get_db()
@@ -536,18 +506,16 @@ def catena_list():
 
 @app.route("/api/corpus/visibility", methods=["GET","POST"])
 def corpus_visibility():
-    """GET: devuelve lista de archivos visibles (null=todos). POST: admin guarda config."""
     vis_path = os.path.join(CORPUS_DIR, "_visibility.json")
     if request.method == "POST":
         err = require_admin()
         if err: return err
         data = request.get_json(silent=True) or {}
-        visible = data.get('visible')  # None = todos, lista = solo esos
+        visible = data.get('visible')
         with open(vis_path, 'w', encoding='utf-8') as f:
             import json as _json2
             _json2.dump({"visible": visible}, f)
         return jsonify({"ok": True, "visible": visible})
-    # GET
     if os.path.exists(vis_path):
         try:
             with open(vis_path, 'r', encoding='utf-8') as f:
@@ -556,7 +524,7 @@ def corpus_visibility():
             return jsonify({"visible": cfg.get("visible")})
         except:
             pass
-    return jsonify({"visible": None})  # null = todos visibles
+    return jsonify({"visible": None})
 
 
 @app.route("/api/corpus/list")
@@ -589,26 +557,21 @@ def corpus_read():
     if not fname:
         return jsonify({"error":"Falta: file"}), 400
     fpath = os.path.join(CORPUS_DIR, fname)
-    print(f"[corpus/read] fpath='{fpath}' exists={os.path.exists(fpath)}")
     if not os.path.exists(fpath):
-        # Buscar nombre similar (por si hay diferencia de mayusculas/espacios)
         matches = [f for f in os.listdir(CORPUS_DIR)
                    if f.lower().replace(' ','_') == fname.lower().replace(' ','_')]
         if matches:
             fpath = os.path.join(CORPUS_DIR, matches[0])
             fname = matches[0]
-            print(f"[corpus/read] fuzzy match: '{fname}'")
         else:
             return jsonify({"error":f"Archivo no encontrado: {fname}",
                             "disponibles": os.listdir(CORPUS_DIR)}), 404
     try:
         result = parse_any(fpath)
     except Exception as e:
-        print(f"[corpus/read] parse_any ERROR: {e}")
         import traceback; traceback.print_exc()
         return jsonify({"error": f"Error parseando archivo: {str(e)}"}), 500
     data   = result.get("data",[])
-    print(f"[corpus/read] tipo={result['type']} items={len(data)}")
     if chapter is not None:
         if 0 <= chapter < len(data):
             return jsonify({"type":result["type"],"item":data[chapter],
@@ -625,12 +588,12 @@ def corpus_read():
             index.append({"i":i,"topic":item.get("topic","")})
     return jsonify({"type":result["type"],"total":len(data),"index":index})
 
+
 # ═══════════════════════════════════════════════════════════════
 # QUIZ PROFÉTICO
 # ═══════════════════════════════════════════════════════════════
 
 def ensure_quiz_table():
-    """Crea la tabla quiz si no existe."""
     db = get_db()
     db.execute("""
         CREATE TABLE IF NOT EXISTS quiz_questions (
@@ -639,17 +602,16 @@ def ensure_quiz_table():
             at_ch     INTEGER NOT NULL,
             at_vs     INTEGER NOT NULL,
             at_text   TEXT,
-            nt_answer TEXT NOT NULL,  -- ej. "Mt 1:23"
+            nt_answer TEXT NOT NULL,
             nt_book   TEXT NOT NULL,
             nt_ch     INTEGER NOT NULL,
             nt_vs     INTEGER NOT NULL,
-            decoys    TEXT NOT NULL DEFAULT '[]',  -- JSON array de strings ["Jn 1:14","Lc 1:31","Is 9:6"]
+            decoys    TEXT NOT NULL DEFAULT '[]',
             hint      TEXT,
             active    INTEGER NOT NULL DEFAULT 1,
             created_at TEXT DEFAULT (datetime('now'))
         )
     """)
-    # Insertar preguntas base si la tabla está vacía
     count = db.execute("SELECT COUNT(*) FROM quiz_questions").fetchone()[0]
     if count == 0:
         SEED = [
@@ -683,7 +645,6 @@ def ensure_quiz_table():
         db.commit()
     db.close()
 
-# Crear tabla al arrancar
 try:
     ensure_quiz_table()
 except Exception as e:
@@ -691,7 +652,6 @@ except Exception as e:
 
 @app.route("/api/quiz/list")
 def quiz_list():
-    """Devuelve todas las preguntas activas en orden aleatorio."""
     db = get_db()
     rows = r2l(db.execute(
         "SELECT * FROM quiz_questions WHERE active=1 ORDER BY RANDOM()"
@@ -704,19 +664,14 @@ def quiz_list():
 
 @app.route("/api/quiz/save", methods=["POST"])
 def quiz_save():
-    """Admin only - crea o actualiza una pregunta."""
     err = require_admin()
     if err: return err
     data = request.get_json(silent=True) or {}
-    qid  = data.get('id')  # si viene id = update, si no = insert
-    
-    # Validar campos requeridos
+    qid  = data.get('id')
     required = ['at_book','at_ch','at_vs','nt_answer','nt_book','nt_ch','nt_vs','decoys']
     for k in required:
         if k not in data: return jsonify({"error": f"Falta: {k}"}), 400
-    
     decoys_json = json.dumps(data['decoys'] if isinstance(data['decoys'],list) else [])
-    
     db = get_db()
     if qid:
         db.execute("""
@@ -752,7 +707,6 @@ def quiz_save():
 
 @app.route("/api/quiz/delete", methods=["POST"])
 def quiz_delete():
-    """Admin only - borra una pregunta."""
     err = require_admin()
     if err: return err
     qid = (request.get_json(silent=True) or {}).get('id')
@@ -767,9 +721,8 @@ def quiz_delete():
 # MÓDULO ADMIN + MODERACIÓN DE PROFECÍAS
 # ═══════════════════════════════════════════════════════════════
 
-# Lee de env var. Para dev local: $env:ADMIN_CODE="..." antes de levantar
 ADMIN_CODE = os.environ.get('ADMIN_CODE', 'dev_change_me_in_env')
-TOKEN_TTL = 60 * 60 * 24 * 7   # 7 días
+TOKEN_TTL = 60 * 60 * 24 * 7
 
 def make_admin_token():
     ts = str(int(time.time()))
@@ -813,15 +766,12 @@ def prophecy_submit():
            'fulfillment_book','fulfillment_chapter','fulfillment_verse']
     for k in req:
         if not data.get(k): return jsonify({"error":f"Falta: {k}"}), 400
-    
     is_admin = verify_admin_token(get_admin_token())
     status = 'approved' if (is_admin and data.get('admin_direct')) else 'pending'
-    
     at_extras_json = json.dumps(data.get('at_extras') or [])[:4000]
     nt_extras_json = json.dumps(data.get('nt_extras') or [])[:4000]
-    
     db = get_db()
-    cur = db.execute("""INSERT INTO prophetic_links 
+    cur = db.execute("""INSERT INTO prophetic_links
         (prophecy_book, prophecy_chapter, prophecy_verse,
          fulfillment_book, fulfillment_chapter, fulfillment_verse,
          category, certainty, description, source, status, submitter,
@@ -850,14 +800,11 @@ def prophecy_submit():
 
 @app.route("/api/prophecy/edit", methods=["POST"])
 def prophecy_edit():
-    """Admin only - edita campos de una profecía existente (pendiente o aprobada)."""
     err = require_admin()
     if err: return err
     data = request.get_json(silent=True) or {}
     pid = data.get('id')
     if not pid: return jsonify({"error":"Falta id"}), 400
-    
-    # Campos editables con sus límites
     EDITABLE = {
         'category': 80, 'certainty': 80, 'description': 3000, 'source': 1500,
         'at_written': 80, 'at_keywords': 200, 'gap': 80,
@@ -865,7 +812,6 @@ def prophecy_edit():
         'prophecy_book': 10, 'fulfillment_book': 10,
     }
     INT_FIELDS = {'prophecy_chapter','prophecy_verse','fulfillment_chapter','fulfillment_verse'}
-    
     fields = []
     values = []
     for k, maxlen in EDITABLE.items():
@@ -881,19 +827,15 @@ def prophecy_edit():
                 fields.append(f"{k}=?")
                 values.append(int(data[k]))
             except: pass
-    # Extras (JSON arrays serializados)
     for k in ('at_extras', 'nt_extras'):
         if k in data:
             v = data[k] if isinstance(data[k], list) else []
             fields.append(f"{k}=?")
             values.append(json.dumps(v)[:4000])
-    
     if not fields:
         return jsonify({"error":"Nada que actualizar"}), 400
-    
     fields.append("updated_at=datetime('now')")
     values.append(pid)
-    
     db = get_db()
     n = db.execute(f"UPDATE prophetic_links SET {', '.join(fields)} WHERE id=?", values).rowcount
     db.commit(); db.close()
@@ -931,7 +873,6 @@ def prophecy_pending():
 
 @app.route("/api/prophecy/approved")
 def prophecy_approved():
-    """Admin only - lista de profecías APROBADAS (para borrar o editar)."""
     err = require_admin()
     if err: return err
     db = get_db()
@@ -948,7 +889,6 @@ def prophecy_approved():
 
 @app.route("/api/prophecy/delete", methods=["POST"])
 def prophecy_delete():
-    """Admin only - BORRA una profecía definitivamente."""
     err = require_admin()
     if err: return err
     pid = (request.get_json(silent=True) or {}).get('id')
@@ -980,32 +920,31 @@ def prophecy_reject():
     db.commit(); db.close()
     return jsonify({"ok":True, "updated":n})
 
+
 # ══════════════════════════════════════════
 # SERVIR REACT BUILD — Railway
 # ══════════════════════════════════════════
-from flask import send_from_directory
-
-BUILD_DIR = os.path.join(BASE, "build")
 
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def serve_react(path):
+    # Proteger rutas API
     if path.startswith("api/"):
         return jsonify({"error": "Not found"}), 404
+    # Servir archivo estático si existe como archivo (no directorio)
     full = os.path.join(BUILD_DIR, path)
-    if path and os.path.exists(full):
+    if path and os.path.isfile(full):
         return send_from_directory(BUILD_DIR, path)
+    # Todo lo demás → index.html (React Router)
     return send_from_directory(BUILD_DIR, "index.html")
+
 
 # ══════════════════════════════════════════
 # ARRANQUE — siempre al final
 # ══════════════════════════════════════════
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5050))
-    if not os.path.exists(DB_PATH):
-        print(f"\nERROR: No se encuentra la DB en:\n  {DB_PATH}\n")
-    else:
-        print(f"\n✠ PROFI-CY corriendo en http://0.0.0.0:{port}")
-        print(f"  DB: {DB_PATH}")
-        print(f"  Build: {BUILD_DIR}")
+    print(f"\n✠ PROFI-CY corriendo en http://0.0.0.0:{port}")
+    print(f"  DB: {DB_PATH} ({'OK' if os.path.exists(DB_PATH) else 'NO ENCONTRADA'})")
+    print(f"  Build: {BUILD_DIR} ({'OK' if os.path.exists(BUILD_DIR) else 'NO ENCONTRADO'})")
     app.run(host="0.0.0.0", port=port, debug=False)
