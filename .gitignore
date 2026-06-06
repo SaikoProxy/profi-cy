@@ -22,3 +22,11 @@ corpus_extra/*.bbli
 .env
 *.log
 {src,public}/
+
+db/*.sqlite
+db/*.sqlite-shm
+db/*.sqlite-wal
+db/*.sqlite.gz
+db/proficy.part*
+db/*.bblx
+*.py.gz
