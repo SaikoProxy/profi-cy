@@ -105,8 +105,14 @@ def parallel():
     if not book or not ch or not vs:
         return jsonify({"error":"Faltan: book, ch, vs"}), 400
     db = get_db()
-    libro   = r2d(db.execute("SELECT name_es,name_la,testament FROM books WHERE abbrev=?",(book,)).fetchone())
-    versos  = r2l(db.execute("""
+
+    try:
+        libro = r2d(db.execute(
+            "SELECT name_es,name_la,testament FROM books WHERE abbrev=?",(book,)).fetchone())
+    except Exception as e:
+        print("parallel: books fallo:", e); libro = None
+
+    versos = r2l(db.execute("""
         SELECT v.version_code,v.lang_code,v.text,v.word_count,v.gematria_val,ver.language
         FROM verses v JOIN versions ver ON ver.code=v.version_code
         WHERE v.book_abbrev=? AND v.chapter=? AND v.verse=?
@@ -114,16 +120,25 @@ def parallel():
     for v in versos:
         if v.get("version_code") == "BHS" and v.get("text"):
             v["text"] = bhs_hebreo_limpio(v["text"])
-    catena  = db.execute("""
-        SELECT text FROM commentaries
-        WHERE source_code='CATENA' AND book_abbrev=?
-          AND chapter_begin<=? AND chapter_end>=? AND verse_begin<=? AND verse_end>=?
-        LIMIT 1""",(book,ch,ch,vs,vs)).fetchone()
-    strongs = r2l(db.execute("""
-        SELECT DISTINCT si.strong_num,si.lang,sd.definition
-        FROM strong_index si LEFT JOIN strong_definitions sd ON sd.strong_num=si.strong_num
-        WHERE si.book_abbrev=? AND si.chapter=? AND si.verse=?
-        ORDER BY si.strong_num LIMIT 20""",(book,ch,vs)).fetchall())
+
+    try:
+        catena = db.execute("""
+            SELECT text FROM commentaries
+            WHERE source_code='CATENA' AND book_abbrev=?
+              AND chapter_begin<=? AND chapter_end>=? AND verse_begin<=? AND verse_end>=?
+            LIMIT 1""",(book,ch,ch,vs,vs)).fetchone()
+    except Exception as e:
+        print("parallel: catena fallo:", e); catena = None
+
+    try:
+        strongs = r2l(db.execute("""
+            SELECT DISTINCT si.strong_num,si.lang,sd.definition
+            FROM strong_index si LEFT JOIN strong_definitions sd ON sd.strong_num=si.strong_num
+            WHERE si.book_abbrev=? AND si.chapter=? AND si.verse=?
+            ORDER BY si.strong_num LIMIT 20""",(book,ch,vs)).fetchall())
+    except Exception as e:
+        print("parallel: strong_index fallo:", e); strongs = []
+
     db.close()
     return jsonify({
         "referencia":f"{book.upper()} {ch}:{vs}",
@@ -131,8 +146,6 @@ def parallel():
         "catena_aurea":catena["text"][:600] if catena else None,
         "strong":strongs
     })
-
-
 @app.route("/api/chapter")
 def chapter():
     book    = request.args.get("book","").lower()
